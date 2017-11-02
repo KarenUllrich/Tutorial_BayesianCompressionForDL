@@ -5,7 +5,7 @@
 Linear Bayesian Model
 
 
-Karen Ullrich, Oct 2017
+Karen Ullrich, Christos Louizos, Oct 2017
 """
 
 
@@ -20,11 +20,12 @@ import torch.optim as optim
 from torchvision import datasets, transforms
 from torch.autograd import Variable
 
-import BayesianLayer
-from compression import compute_compression_rate,compute_reduced_weights
+import BayesianLayers
+from compression import compute_compression_rate, compute_reduced_weights
 from utils import visualize_pixel_importance, generate_gif, visualise_weights
 
 N = 60000.  # number of data points in the training set
+
 
 def main():
     # import data
@@ -48,7 +49,6 @@ def main():
     examples = train_loader.sampler.data_source.train_data[0:5].numpy()
     images = np.vstack([mask, examples])
 
-
     # build a simple MLP
     class Net(nn.Module):
         def __init__(self):
@@ -56,9 +56,9 @@ def main():
             # activation
             self.relu = nn.ReLU()
             # layers
-            self.fc1 = BayesianLayer.LinearGroupVD(28 * 28, 300, clip_var=0.04)
-            self.fc2 = BayesianLayer.LinearGroupVD(300, 100)
-            self.fc3 = BayesianLayer.LinearGroupVD(100, 10)
+            self.fc1 = BayesianLayers.LinearGroupNJ(28 * 28, 300, clip_var=0.04, cuda=FLAGS.cuda)
+            self.fc2 = BayesianLayers.LinearGroupNJ(300, 100, cuda=FLAGS.cuda)
+            self.fc3 = BayesianLayers.LinearGroupNJ(100, 10, cuda=FLAGS.cuda)
             # layers including kl_divergence
             self.kl_list = [self.fc1, self.fc2, self.fc3]
 
@@ -109,8 +109,10 @@ def main():
 
     def objective(output, target, kl_divergence):
         discrimination_error = discrimination_loss(output, target)
-        return discrimination_error + kl_divergence / N
-
+        variational_bound = discrimination_error + kl_divergence / N
+        if FLAGS.cuda:
+            variational_bound = variational_bound.cuda()
+        return variational_bound
 
     def train(epoch):
         model.train()
@@ -123,6 +125,9 @@ def main():
             loss = objective(output, target, model.kl_divergence())
             loss.backward()
             optimizer.step()
+            # clip the variances after each step
+            for layer in model.kl_list:
+                layer.clip_variances()
         print('Epoch: {} \tTrain loss: {:.6f} \t'.format(
             epoch, loss.data[0]))
 
@@ -135,18 +140,18 @@ def main():
                 data, target = data.cuda(), target.cuda()
             data, target = Variable(data, volatile=True), Variable(target)
             output = model(data)
-            test_loss += F.nll_loss(output, target, size_average=False).data[0]
+            test_loss += discrimination_loss(output, target, size_average=False).data[0]
             pred = output.data.max(1, keepdim=True)[1]
             correct += pred.eq(target.data.view_as(pred)).cpu().sum()
         test_loss /= len(test_loader.dataset)
-        print('Test loss: {:.4f}, Accuracy: {}/{} ({:.1f}%)\n'.format(
+        print('Test loss: {:.4f}, Accuracy: {}/{} ({:.2f}%)\n'.format(
             test_loss, correct, len(test_loader.dataset),
             100. * correct / len(test_loader.dataset)))
 
     # train the model and save some visualisations on the way
     for epoch in range(1, FLAGS.epochs + 1):
         train(epoch)
-        #test()
+        test()
         # visualizations
         weight_mus = [model.fc1.weight_mu, model.fc2.weight_mu]
         log_alphas = [model.fc1.get_log_dropout_rates(), model.fc2.get_log_dropout_rates(),
@@ -166,8 +171,8 @@ def main():
 
     print("Test error after with reduced bit precision:")
 
-    weights= compute_reduced_weights(layers, model.get_masks(thresholds))
-    for layer,weight in zip(layers,weights):
+    weights = compute_reduced_weights(layers, model.get_masks(thresholds))
+    for layer, weight in zip(layers, weights):
         if FLAGS.cuda:
             layer.post_weight_mu.data = torch.Tensor(weight).cuda()
         else:
@@ -175,12 +180,13 @@ def main():
     for layer in layers: layer.deterministic = True
     test()
 
+
 if __name__ == '__main__':
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument('--epochs', type=int, default=5)
     parser.add_argument('--batchsize', type=int, default=128)
-    parser.add_argument('--thresholds', type=float, nargs='*', default= [-2.8, -3., -5.])
+    parser.add_argument('--thresholds', type=float, nargs='*', default=[-2.8, -3., -5.])
 
     FLAGS = parser.parse_args()
     FLAGS.cuda = torch.cuda.is_available()  # check if we can put the net on the GPU

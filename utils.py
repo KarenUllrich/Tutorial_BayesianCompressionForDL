@@ -22,6 +22,7 @@ cmap = sns.diverging_palette(240, 10, sep=100, as_cmap=True)
 # VISUALISATION TOOLS
 # -------------------------------------------------------
 
+
 def visualize_pixel_importance(imgs, log_alpha, epoch="pixel_importance"):
     num_imgs = len(imgs)
 
@@ -42,7 +43,7 @@ def visualize_pixel_importance(imgs, log_alpha, epoch="pixel_importance"):
 def visualise_weights(weight_mus, log_alphas, epoch):
     num_layers = len(weight_mus)
 
-    for i in xrange(num_layers):
+    for i in range(num_layers):
         f, ax = plt.subplots(1, 1)
         weight_mu = np.transpose(weight_mus[i].cpu().data.numpy())
         # alpha

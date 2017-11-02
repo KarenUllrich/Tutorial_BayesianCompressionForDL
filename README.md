@@ -1,17 +1,18 @@
 # Code release for "Bayesian Compression for Deep Learning"
 
 
-In "Bayesian Compression for Deep Learning" we take an information theoretic take on the compression of neural networks. We explicitly revisit the connection between the minimum description length principle and variational inference.
+In "Bayesian Compression for Deep Learning" we adopt a Bayesian view for the compression of neural networks. 
+By revisiting the connection between the minimum description length principle and variational inference we are 
+able to achieve up to 700x compression and up to 50x speed up (CPU to sparse GPU) for neural networks.
 
-Compression of neural networks with up to 700x and speed up up to 50x (CPU to sparse GPU).
-
-We achive these results by learning additive noise to the weights. We visualize the learning process in the following figures examplarily for a dense network with 300 and 100 connections. Whitness represents redundacy, red and blue positive and negative weights respectively.
+We visualize the learning process in the following figures for a dense network with 300 and 100 connections. 
+White color represents redundancy whereas red and blue represent positive and negative weights respectively.
 
 |First layer weights |Second Layer weights|
 | :------ |:------: |
 |![alt text](./figures/weight0_e.gif "First layer weights")|![alt text](./figures/weight1_e.gif "Second Layer weights")|
 
-For dense networks it is also simple to reconstruct input feature impartance. We show this for a mask and 5 randomly chosen digits.
+For dense networks it is also simple to reconstruct input feature importance. We show this for a mask and 5 randomly chosen digits.
 ![alt text](./figures/pixel.gif "Pixel importance")
 
 
@@ -30,11 +31,11 @@ For dense networks it is also simple to reconstruct input feature impartance. We
 |                   |BC-GHS  |   9.0 |    18*    |  59|
 
 ## Usage
-We provide an implementation in pyTorch for linear and convolutional layers for the group normal-Jeffreys prior (aka Group Variational Dropout) via
+We provide an implementation in PyTorch for fully connected and convolutional layers for the group normal-Jeffreys prior (aka Group Variational Dropout) via:
 ```python
-import BayesianLayer
+import BayesianLayers
 ```
-Layers can be inclued equivalently to their frequentist counter parts.
+The layers can be then straightforwardly included eas follows:
 ```python
     class Net(nn.Module):
         def __init__(self):
@@ -42,9 +43,9 @@ Layers can be inclued equivalently to their frequentist counter parts.
             # activation
             self.relu = nn.ReLU()
             # layers
-            self.fc1 = BayesianLayer.LinearGroupVD(28 * 28, 300, clip_var=0.04)
-            self.fc2 = BayesianLayer.LinearGroupVD(300, 100)
-            self.fc3 = BayesianLayer.LinearGroupVD(100, 10)
+            self.fc1 = BayesianLayers.LinearGroupNJ(28 * 28, 300, clip_var=0.04)
+            self.fc2 = BayesianLayers.LinearGroupNJ(300, 100)
+            self.fc3 = BayesianLayers.LinearGroupNJ(100, 10)
             # layers including kl_divergence
             self.kl_list = [self.fc1, self.fc2, self.fc3]
 
@@ -60,7 +61,8 @@ Layers can be inclued equivalently to their frequentist counter parts.
                 KLD += layer.kl_divergence()
             return KLD
 ```
-The only addional effort is to define a KL-divergence. Which is of need for the optimisation of the variational lower bound
+The only additional effort is to include the KL-divergence in the objective. 
+This is necessary if we want to the optimize the variational lower bound that leads to sparse solutions:
 ```python
 N = 60000.
 discrimination_loss = nn.functional.cross_entropy
@@ -70,15 +72,16 @@ def objective(output, target, kl_divergence):
     return discrimination_error + kl_divergence / N
 ```
 ## Run an example
-We provide a simple example, the LeNet-300-100 trained with normal-Jeffreys prior.
+We provide a simple example, the LeNet-300-100 trained with the group normal-Jeffreys prior:
 ```sh
 python example.py
 ```
 
 ## Retraining a regular neural network
-Often times we wish to compress an already existing network. To retrain a pretrained network just inialize the weights when creating an equivalent Bayesian network
+Instead of training a network from scratch we often need to compress an already existing network. 
+In this case we can simply initialize the weights with those of the pretrained network:
 ```python
-    BayesianLayer.LinearGroupVD(28*28, 300,init_weight=pretrained_weight, init_bias=pretrained_bias)
+    BayesianLayers.LinearGroupNJ(28*28, 300, init_weight=pretrained_weight, init_bias=pretrained_bias)
 ```
 ## *Reference*
 The paper "Bayesian Compression for Deep Learning" has been accepted to NIPS 2017. Please cite us:

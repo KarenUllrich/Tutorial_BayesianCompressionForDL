@@ -5,7 +5,7 @@
 Variational Dropout version of linear and convolutional layers
 
 
-Karen Ullrich, Oct 2017
+Karen Ullrich, Christos Louizos, Oct 2017
 """
 
 import math
@@ -19,7 +19,7 @@ from torch.autograd import Variable
 from torch.nn.modules import utils
 
 
-def reparameterise(mu, logvar, cuda=True, sampling=True):
+def reparametrize(mu, logvar, cuda=False, sampling=True):
     if sampling:
         std = logvar.mul(0.5).exp_()
         if cuda:
@@ -36,8 +36,8 @@ def reparameterise(mu, logvar, cuda=True, sampling=True):
 # LINEAR LAYER
 # -------------------------------------------------------
 
-class LinearGroupVD(Module):
-    """Linear Group Variational Dropout Layer
+class LinearGroupNJ(Module):
+    """Fully Connected Group Normal-Jeffrey's layer (aka Group Variational Dropout).
 
     References:
     [1] Kingma, Diederik P., Tim Salimans, and Max Welling. "Variational dropout and the local reparameterization trick." NIPS (2015).
@@ -45,14 +45,14 @@ class LinearGroupVD(Module):
     [3] Louizos, Christos, Karen Ullrich, and Max Welling. "Bayesian Compression for Deep Learning." NIPS (2017).
     """
 
-    def __init__(self, in_features, out_features, cuda=True, init_weight=None, init_bias=None, clip_var=None):
+    def __init__(self, in_features, out_features, cuda=False, init_weight=None, init_bias=None, clip_var=None):
 
-        super(LinearGroupVD, self).__init__()
+        super(LinearGroupNJ, self).__init__()
         self.cuda = cuda
         self.in_features = in_features
         self.out_features = out_features
         self.clip_var = clip_var
-        self.deterministic = False # flag is used for compressed inference
+        self.deterministic = False  # flag is used for compressed inference
         # trainable params according to Eq.(6)
         # dropout params
         self.z_mu = Parameter(torch.Tensor(in_features))
@@ -95,14 +95,17 @@ class LinearGroupVD(Module):
         self.weight_logvar.data.normal_(-9, 1e-2)
         self.bias_logvar.data.normal_(-9, 1e-2)
 
+    def clip_variances(self):
+        if self.clip_var:
+            self.weight_logvar.data.clamp_(max=math.log(self.clip_var))
+            self.bias_logvar.data.clamp_(max=math.log(self.clip_var))
+
     def get_log_dropout_rates(self):
         log_alpha = self.z_logvar - torch.log(self.z_mu.pow(2) + self.epsilon)
         return log_alpha
 
     def compute_posterior_params(self):
         weight_var, z_var = self.weight_logvar.exp(), self.z_logvar.exp()
-        if self.clip_var:
-            weight_var = torch.clamp(weight_var, 0., self.clip_var)
         self.post_weight_var = self.z_mu.pow(2) * weight_var + z_var * self.weight_mu.pow(2) + z_var * weight_var
         self.post_weight_mu = self.weight_mu * self.z_mu
         return self.post_weight_mu, self.post_weight_var
@@ -115,20 +118,16 @@ class LinearGroupVD(Module):
         batch_size = x.size()[0]
         # compute z  
         # note that we reparametrise according to [2] Eq. (11) (not [1])
-        z = reparameterise(self.z_mu.repeat(batch_size, 1), self.z_logvar.repeat(batch_size, 1), sampling=self.training,
-                           cuda=self.cuda)
+        z = reparametrize(self.z_mu.repeat(batch_size, 1), self.z_logvar.repeat(batch_size, 1), sampling=self.training,
+                          cuda=self.cuda)
 
         # apply local reparametrisation trick see [1] Eq. (6)
         # to the parametrisation given in [3] Eq. (6)
         xz = x * z
         mu_activations = F.linear(xz, self.weight_mu, self.bias_mu)
+        var_activations = F.linear(xz.pow(2), self.weight_logvar.exp(), self.bias_logvar.exp())
 
-        var_weights = self.weight_logvar.exp()
-        if self.clip_var:
-            var_weights = torch.clamp(var_weights, 0., self.clip_var)
-        var_activations = F.linear(xz.pow(2), var_weights, self.bias_logvar.exp())
-
-        return reparameterise(mu_activations, var_activations.log(), sampling=self.training, cuda=self.cuda)
+        return reparametrize(mu_activations, var_activations.log(), sampling=self.training, cuda=self.cuda)
 
     def kl_divergence(self):
         # KL(q(z)||p(z))
@@ -158,10 +157,17 @@ class LinearGroupVD(Module):
 # CONVOLUTIONAL LAYER
 # -------------------------------------------------------
 
-class _ConvNdGroupVD(Module):
-    def __init__(self, in_channels, out_channels, kernel_size, stride,
-                 padding, dilation, transposed, output_padding, groups, bias, init_weight, init_bias, cuda=True):
-        super(_ConvNdGroupVD, self).__init__()
+class _ConvNdGroupNJ(Module):
+    """Convolutional Group Normal-Jeffrey's layers (aka Group Variational Dropout).
+
+    References:
+    [1] Kingma, Diederik P., Tim Salimans, and Max Welling. "Variational dropout and the local reparameterization trick." NIPS (2015).
+    [2] Molchanov, Dmitry, Arsenii Ashukha, and Dmitry Vetrov. "Variational Dropout Sparsifies Deep Neural Networks." ICML (2017).
+    [3] Louizos, Christos, Karen Ullrich, and Max Welling. "Bayesian Compression for Deep Learning." NIPS (2017).
+    """
+    def __init__(self, in_channels, out_channels, kernel_size, stride, padding, dilation, transposed, output_padding,
+                 groups, bias, init_weight, init_bias, cuda=False, clip_var=None):
+        super(_ConvNdGroupNJ, self).__init__()
         if in_channels % groups != 0:
             raise ValueError('in_channels must be divisible by groups')
         if out_channels % groups != 0:
@@ -177,6 +183,8 @@ class _ConvNdGroupVD(Module):
         self.groups = groups
 
         self.cuda = cuda
+        self.clip_var = clip_var
+        self.deterministic = False  # flag is used for compressed inference
 
         if transposed:
             self.weight_mu = Parameter(torch.Tensor(
@@ -192,8 +200,8 @@ class _ConvNdGroupVD(Module):
         self.bias_mu = Parameter(torch.Tensor(out_channels))
         self.bias_logvar = Parameter(torch.Tensor(out_channels))
 
-        self.z_mu = Parameter(torch.Tensor(self.out_channels, 1, 1))
-        self.z_logvar = Parameter(torch.Tensor(self.out_channels, 1, 1))
+        self.z_mu = Parameter(torch.Tensor(self.out_channels))
+        self.z_logvar = Parameter(torch.Tensor(self.out_channels))
 
         self.reset_parameters(init_weight, init_bias)
 
@@ -228,6 +236,11 @@ class _ConvNdGroupVD(Module):
         self.z_logvar.data.normal_(-9, 1e-2)
         self.weight_logvar.data.normal_(-9, 1e-2)
         self.bias_logvar.data.normal_(-9, 1e-2)
+
+    def clip_variances(self):
+        if self.clip_var:
+            self.weight_logvar.data.clamp_(max=math.log(self.clip_var))
+            self.bias_logvar.data.clamp_(max=math.log(self.clip_var))
 
     def get_log_dropout_rates(self):
         log_alpha = self.z_logvar - torch.log(self.z_mu.pow(2) + self.epsilon)
@@ -274,20 +287,20 @@ class _ConvNdGroupVD(Module):
         return s.format(name=self.__class__.__name__, **self.__dict__)
 
 
-class Conv1dGroupVD(_ConvNdGroupVD):
+class Conv1dGroupNJ(_ConvNdGroupNJ):
     r"""
     """
 
-    def __init__(self, in_channels, out_channels, kernel_size, stride=1,
-                 padding=0, dilation=1, groups=1, bias=True, cuda=True, init_weight=None, init_bias=None):
+    def __init__(self, in_channels, out_channels, kernel_size, stride=1, padding=0, dilation=1, groups=1, bias=True,
+                 cuda=False, init_weight=None, init_bias=None, clip_var=None):
         kernel_size = utils._single(kernel_size)
         stride = utils._single(stride)
         padding = utils._single(padding)
         dilation = utils._single(dilation)
 
-        super(Conv1dGroupVD, self).__init__(
+        super(Conv1dGroupNJ, self).__init__(
             in_channels, out_channels, kernel_size, stride, padding, dilation,
-            False, utils._pair(0), groups, bias, init_weight, init_bias, cuda)
+            False, utils._pair(0), groups, bias, init_weight, init_bias, cuda, clip_var)
 
     def forward(self, x):
         if self.deterministic:
@@ -299,16 +312,16 @@ class Conv1dGroupVD(_ConvNdGroupVD):
         mu_activations = F.conv1d(x, self.weight_mu, self.bias_mu, self.stride,
                                   self.padding, self.dilation, self.groups)
 
-        var_weights = self.weight_logvar.exp()
-        var_activations = F.conv1d(x.pow(2), var_weights, self.bias_logvar.exp(), self.stride,
+        var_activations = F.conv1d(x.pow(2), self.weight_logvar.exp(), self.bias_logvar.exp(), self.stride,
                                    self.padding, self.dilation, self.groups)
         # compute z
         # note that we reparametrise according to [2] Eq. (11) (not [1])
-        z = reparameterise(self.z_mu.repeat(batch_size, 1, 1, 1), self.z_logvar.repeat(batch_size, 1, 1, 1),
-                           sampling=self.training,
-                           cuda=self.cuda)
-        return reparameterise(mu_activations * z, (var_activations * z.pow(2)).log(), sampling=self.training,
-                              cuda=self.cuda)
+        z = reparametrize(self.z_mu.repeat(batch_size, 1, 1), self.z_logvar.repeat(batch_size, 1, 1),
+                          sampling=self.training, cuda=self.cuda)
+        z = z[:, :, None]
+
+        return reparametrize(mu_activations * z, (var_activations * z.pow(2)).log(), sampling=self.training,
+                             cuda=self.cuda)
 
     def __repr__(self):
         return self.__class__.__name__ + ' (' \
@@ -316,20 +329,20 @@ class Conv1dGroupVD(_ConvNdGroupVD):
                + str(self.out_features) + ')'
 
 
-class Conv2dGroupVD(_ConvNdGroupVD):
+class Conv2dGroupNJ(_ConvNdGroupNJ):
     r"""
     """
 
-    def __init__(self, in_channels, out_channels, kernel_size, stride=1,
-                 padding=0, dilation=1, groups=1, bias=True, cuda=True, init_weight=None, init_bias=None):
+    def __init__(self, in_channels, out_channels, kernel_size, stride=1, padding=0, dilation=1, groups=1, bias=True,
+                 cuda=False, init_weight=None, init_bias=None, clip_var=None):
         kernel_size = utils._pair(kernel_size)
         stride = utils._pair(stride)
         padding = utils._pair(padding)
         dilation = utils._pair(dilation)
 
-        super(Conv2dGroupVD, self).__init__(
+        super(Conv2dGroupNJ, self).__init__(
             in_channels, out_channels, kernel_size, stride, padding, dilation,
-            False, utils._pair(0), groups, bias, init_weight, init_bias, cuda)
+            False, utils._pair(0), groups, bias, init_weight, init_bias, cuda, clip_var)
 
     def forward(self, x):
         if self.deterministic:
@@ -341,16 +354,16 @@ class Conv2dGroupVD(_ConvNdGroupVD):
         mu_activations = F.conv2d(x, self.weight_mu, self.bias_mu, self.stride,
                                   self.padding, self.dilation, self.groups)
 
-        var_weights = self.weight_logvar.exp()
-        var_activations = F.conv2d(x.pow(2), var_weights, self.bias_logvar.exp(), self.stride,
+        var_activations = F.conv2d(x.pow(2), self.weight_logvar.exp(), self.bias_logvar.exp(), self.stride,
                                    self.padding, self.dilation, self.groups)
         # compute z
         # note that we reparametrise according to [2] Eq. (11) (not [1])
-        z = reparameterise(self.z_mu.repeat(batch_size, 1, 1, 1), self.z_logvar.repeat(batch_size, 1, 1, 1),
-                           sampling=self.training,
-                           cuda=self.cuda)
-        return reparameterise(mu_activations * z, (var_activations * z.pow(2)).log(), sampling=self.training,
-                              cuda=self.cuda)
+        z = reparametrize(self.z_mu.repeat(batch_size, 1), self.z_logvar.repeat(batch_size, 1),
+                          sampling=self.training, cuda=self.cuda)
+        z = z[:, :, None, None]
+
+        return reparametrize(mu_activations * z, (var_activations * z.pow(2)).log(), sampling=self.training,
+                             cuda=self.cuda)
 
     def __repr__(self):
         return self.__class__.__name__ + ' (' \
@@ -358,20 +371,20 @@ class Conv2dGroupVD(_ConvNdGroupVD):
                + str(self.out_features) + ')'
 
 
-class Conv3dGroupVD(_ConvNdGroupVD):
+class Conv3dGroupNJ(_ConvNdGroupNJ):
     r"""
     """
 
-    def __init__(self, in_channels, out_channels, kernel_size, stride=1,
-                 padding=0, dilation=1, groups=1, bias=True, cuda=True, init_weight=None, init_bias=None):
+    def __init__(self, in_channels, out_channels, kernel_size, stride=1, padding=0, dilation=1, groups=1, bias=True,
+                 cuda=False, init_weight=None, init_bias=None, clip_var=None):
         kernel_size = utils._triple(kernel_size)
         stride = utils._triple(stride)
         padding = utils._triple(padding)
         dilation = utils.triple(dilation)
 
-        super(Conv3dGroupVD, self).__init__(
+        super(Conv3dGroupNJ, self).__init__(
             in_channels, out_channels, kernel_size, stride, padding, dilation,
-            False, utils._pair(0), groups, bias, init_weight, init_bias, cuda)
+            False, utils._pair(0), groups, bias, init_weight, init_bias, cuda, clip_var)
 
     def forward(self, x):
         if self.deterministic:
@@ -388,11 +401,12 @@ class Conv3dGroupVD(_ConvNdGroupVD):
                                    self.padding, self.dilation, self.groups)
         # compute z
         # note that we reparametrise according to [2] Eq. (11) (not [1])
-        z = reparameterise(self.z_mu.repeat(batch_size, 1, 1, 1), self.z_logvar.repeat(batch_size, 1, 1, 1),
-                           sampling=self.training,
-                           cuda=self.cuda)
-        return reparameterise(mu_activations * z, (var_activations * z.pow(2)).log(), sampling=self.training,
-                              cuda=self.cuda)
+        z = reparametrize(self.z_mu.repeat(batch_size, 1, 1, 1, 1), self.z_logvar.repeat(batch_size, 1, 1, 1, 1),
+                          sampling=self.training, cuda=self.cuda)
+        z = z[:, :, None, None, None]
+
+        return reparametrize(mu_activations * z, (var_activations * z.pow(2)).log(), sampling=self.training,
+                             cuda=self.cuda)
 
     def __repr__(self):
         return self.__class__.__name__ + ' (' \

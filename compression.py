@@ -18,6 +18,7 @@ import numpy as np
 # General tools
 # -------------------------------------------------------
 
+
 def unit_round_off(t=23):
     """
     :param t:
@@ -27,12 +28,15 @@ def unit_round_off(t=23):
     """
     return 0.5 * 2. ** (1. - t)
 
-SIGNIFICANT_BIT_PRECISION = [unit_round_off(t=i + 1) for i in xrange(23)]
+
+SIGNIFICANT_BIT_PRECISION = [unit_round_off(t=i + 1) for i in range(23)]
+
 
 def float_precision(x):
 
     out = np.sum([x < sbp for sbp in SIGNIFICANT_BIT_PRECISION])
     return out
+
 
 def float_precisions(X, dist_fun, layer=1):
 
@@ -41,11 +45,13 @@ def float_precisions(X, dist_fun, layer=1):
     out = np.ceil(dist_fun(out))
     return out
 
+
 def special_round(input, significant_bit):
     delta = unit_round_off(t=significant_bit)
     rounded = np.floor(input / delta + 0.5)
     rounded = rounded * delta
     return rounded
+
 
 def fast_infernce_weights(w, exponent_bit, significant_bit):
 
@@ -66,6 +72,7 @@ def compress_matrix(x):
         x = x[:, (x != 0).any(axis=0)]
     return x
 
+
 def extract_pruned_params(layers, masks):
 
     post_weight_mus = []
@@ -85,9 +92,11 @@ def extract_pruned_params(layers, masks):
 
     return post_weight_mus, post_weight_vars
 
+
 # -------------------------------------------------------
 #  Compression rates (fast inference scenario)
 # -------------------------------------------------------
+
 
 def _compute_compression_rate(vars, in_precision=32., dist_fun=lambda x: np.max(x), overflow=10e38):
     # compute in  number of bits occupied by the original architecture
@@ -112,8 +121,8 @@ def compute_compression_rate(layers, masks):
     overflow = np.max([np.max(np.abs(w)) for w in weight_mus])
     # compute compression rate
     CR_architecture, CR_fast_inference, _, _ = _compute_compression_rate(weight_vars, dist_fun=lambda x: np.mean(x), overflow=overflow)
-    print "Compressing the architecture will degrease the model by a factor of %.1f." % (CR_architecture)
-    print "Making use of weight uncertainty can reduce the model by a factor of %.1f." % (CR_fast_inference)
+    print("Compressing the architecture will degrease the model by a factor of %.1f." % (CR_architecture))
+    print("Making use of weight uncertainty can reduce the model by a factor of %.1f." % (CR_fast_inference))
 
 
 def compute_reduced_weights(layers, masks):
