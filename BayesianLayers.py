@@ -261,11 +261,11 @@ class _ConvNdGroupNJ(Module):
 
         # KL(q(w|z)||p(w|z))
         # we use the kl divergence given by [3] Eq.(8)
-        KLD_element = -self.weight_logvar + 0.5 * (self.weight_logvar.exp().pow(2) + self.weight_mu.pow(2)) - 0.5
+        KLD_element = -self.weight_logvar + 0.5 * (self.weight_logvar.exp() + self.weight_mu.pow(2)) - 0.5
         KLD += torch.sum(KLD_element)
 
         # KL bias
-        KLD_element = -self.bias_logvar + 0.5 * (self.bias_logvar.exp().pow(2) + self.bias_mu.pow(2)) - 0.5
+        KLD_element = -self.bias_logvar + 0.5 * (self.bias_logvar.exp() + self.bias_mu.pow(2)) - 0.5
         KLD += torch.sum(KLD_element)
 
         return KLD
